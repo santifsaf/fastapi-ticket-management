@@ -4,14 +4,19 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import UUID
 
+import pytest
+
 from app.models.category import TeamAssignmentStrategy
 from app.models.team import AssignmentStrategy
 from app.services.assignment_timing import calculate_assignment_due_at
+from app.services import ticket_auto_assignment_service
 from app.services.ticket_auto_assignment_service import (
+    AssignmentOutcome,
     AutoAssignmentCandidate,
     TeamAssignmentCandidate,
     choose_auto_assignment_candidate,
     choose_team_assignment_candidate,
+    process_due_auto_assignments,
 )
 
 
@@ -123,3 +128,107 @@ def test_assignment_due_at_uses_delay_only_when_automation_is_enabled():
 
     assert enabled_due_at == now + timedelta(minutes=20)
     assert disabled_due_at is None
+
+
+class FakeBatchDb:
+    def __init__(self):
+        self.rollback_calls = 0
+
+    def rollback(self):
+        self.rollback_calls += 1
+
+
+def test_batch_continues_after_individual_errors_and_counts_each_outcome(
+    monkeypatch,
+):
+    """Un ticket defectuoso no impide procesar los siguientes de la tanda."""
+
+    team_ids = [UUID(int=value) for value in range(1, 5)]
+    user_ids = [UUID(int=value) for value in range(5, 8)]
+    processed_ids = []
+    logged_errors = []
+    db = FakeBatchDb()
+
+    class FakeLogger:
+        def exception(self, message, *, extra):
+            logged_errors.append((message, extra))
+
+    def fake_find_due_team_ticket_ids(db, current_time, limit):
+        return team_ids
+
+    def fake_find_due_user_ticket_ids(db, current_time, limit):
+        return user_ids
+
+    monkeypatch.setattr(
+        ticket_auto_assignment_service,
+        "_find_due_team_ticket_ids",
+        fake_find_due_team_ticket_ids,
+    )
+    monkeypatch.setattr(
+        ticket_auto_assignment_service,
+        "_find_due_user_ticket_ids",
+        fake_find_due_user_ticket_ids,
+    )
+
+    def fake_team_executor(db, ticket_id, *, now):
+        processed_ids.append(ticket_id)
+        outcomes = {
+            team_ids[0]: AssignmentOutcome.ASSIGNED,
+            team_ids[2]: AssignmentOutcome.NO_CANDIDATE,
+            team_ids[3]: AssignmentOutcome.SKIPPED,
+        }
+        if ticket_id == team_ids[1]:
+            raise RuntimeError("Team assignment failed")
+        return outcomes[ticket_id]
+
+    def fake_user_executor(db, ticket_id, *, now):
+        processed_ids.append(ticket_id)
+        if ticket_id == user_ids[2]:
+            raise RuntimeError("User assignment failed")
+        return (
+            AssignmentOutcome.ASSIGNED
+            if ticket_id == user_ids[0]
+            else AssignmentOutcome.NO_CANDIDATE
+        )
+
+    monkeypatch.setattr(
+        ticket_auto_assignment_service,
+        "auto_assign_ticket_to_team",
+        fake_team_executor,
+    )
+    monkeypatch.setattr(
+        ticket_auto_assignment_service,
+        "auto_assign_ticket_to_user",
+        fake_user_executor,
+    )
+    monkeypatch.setattr(ticket_auto_assignment_service, "logger", FakeLogger())
+
+    result = process_due_auto_assignments(db)
+
+    assert processed_ids == team_ids + user_ids
+    assert result.teams_assigned == 1
+    assert result.users_assigned == 1
+    assert result.teams_without_candidate == 1
+    assert result.users_without_candidate == 1
+    assert result.skipped == 1
+    assert result.errors == 2
+    assert db.rollback_calls == 2
+    assert len(logged_errors) == 2
+    assert logged_errors[0][1]["assignment_phase"] == "TEAM"
+    assert logged_errors[1][1]["assignment_phase"] == "USER"
+
+
+def test_batch_propagates_error_when_due_ticket_query_cannot_start(monkeypatch):
+    """Una caída general de base debe fallar la ejecución completa."""
+
+    def fail_query(db, current_time, limit):
+        raise ConnectionError("Database unavailable")
+
+    monkeypatch.setattr(
+        ticket_auto_assignment_service,
+        "_find_due_team_ticket_ids",
+        fail_query,
+    )
+
+    with pytest.raises(ConnectionError, match="Database unavailable"):
+        process_due_auto_assignments(FakeBatchDb())

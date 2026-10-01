@@ -405,6 +405,11 @@ elige un miembro activo mediante `LEAST_ACTIVE` o `LONGEST_IDLE`. Las filas de
 ticket se bloquean con `FOR UPDATE SKIP LOCKED` para que dos workers no procesen
 el mismo ticket; si no hay candidato, permanece en cola para otro intento.
 
+Cada intento devuelve `ASSIGNED`, `NO_CANDIDATE` o `SKIPPED`. El procesador
+aísla las excepciones por ticket, hace rollback, registra el ticket y la etapa,
+y continúa con el resto. `AutoAssignmentResult` resume asignaciones, ausencia de
+candidatos, omisiones y errores para facilitar el monitoreo del futuro worker.
+
 Los historiales distinguen `MANUAL`, `CLAIM` y `AUTOMATIC`. En una acción
 automática, `changed_by` queda en `NULL` porque no intervino una persona.
 
@@ -655,7 +660,7 @@ self_assignment_enabled = true
 Un `AGENT` o `ADMIN` miembro puede tomar voluntariamente un ticket `OPEN`, no
 archivado, sin responsable y perteneciente a su equipo.
 
-### Autoasignación futura
+### Autoasignación escalonada
 
 ```text
 auto_assignment_enabled

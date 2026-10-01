@@ -1,8 +1,12 @@
 """Selección y ejecución de la autoasignación por categoría y equipo."""
 
+import logging
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from fractions import Fraction
+from typing import Callable
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -24,6 +28,15 @@ ACTIVE_TICKET_STATUSES = {
     TicketStatus.ON_HOLD,
 }
 OPERATIONAL_USER_ROLES = {UserRole.AGENT, UserRole.ADMIN}
+logger = logging.getLogger(__name__)
+
+
+class AssignmentOutcome(str, Enum):
+    """Resultado esperado al intentar una autoasignación individual."""
+
+    ASSIGNED = "ASSIGNED"
+    NO_CANDIDATE = "NO_CANDIDATE"
+    SKIPPED = "SKIPPED"
 
 
 @dataclass(frozen=True)
@@ -218,7 +231,7 @@ def auto_assign_ticket_to_team(
     ticket_id: UUID,
     *,
     now: datetime | None = None,
-) -> Ticket | None:
+) -> AssignmentOutcome:
     """Asigna un ticket vencido a un equipo y registra el evento automático."""
 
     current_time = now or datetime.now(timezone.utc)
@@ -232,7 +245,7 @@ def auto_assign_ticket_to_team(
         if ticket is None:
             # SKIP LOCKED también devuelve None si otro worker ya tomó la fila.
             db.rollback()
-            return None
+            return AssignmentOutcome.SKIPPED
 
         is_eligible = (
             ticket.team_id is None
@@ -245,7 +258,7 @@ def auto_assign_ticket_to_team(
         )
         if not is_eligible:
             db.rollback()
-            return None
+            return AssignmentOutcome.SKIPPED
 
         team = find_category_team_assignment_candidate(
             db,
@@ -254,7 +267,7 @@ def auto_assign_ticket_to_team(
         )
         if team is None:
             db.rollback()
-            return None
+            return AssignmentOutcome.NO_CANDIDATE
 
         ticket.team_id = team.id
         ticket.team_queue_entered_at = None
@@ -277,7 +290,8 @@ def auto_assign_ticket_to_team(
                 source=AssignmentSource.AUTOMATIC,
             )
         )
-        return commit_and_refresh(db, ticket)
+        commit_and_refresh(db, ticket)
+        return AssignmentOutcome.ASSIGNED
     except Exception:
         db.rollback()
         raise
@@ -288,7 +302,7 @@ def auto_assign_ticket_to_user(
     ticket_id: UUID,
     *,
     now: datetime | None = None,
-) -> Ticket | None:
+) -> AssignmentOutcome:
     """Asigna un ticket vencido a un miembro y registra el evento automático."""
 
     current_time = now or datetime.now(timezone.utc)
@@ -302,7 +316,7 @@ def auto_assign_ticket_to_user(
         if ticket is None:
             # El ticket puede existir pero estar bloqueado por otro worker.
             db.rollback()
-            return None
+            return AssignmentOutcome.SKIPPED
 
         is_eligible = (
             ticket.team_id is not None
@@ -315,7 +329,7 @@ def auto_assign_ticket_to_user(
         )
         if not is_eligible:
             db.rollback()
-            return None
+            return AssignmentOutcome.SKIPPED
 
         selected_user = find_team_auto_assignment_candidate(
             db,
@@ -324,15 +338,16 @@ def auto_assign_ticket_to_user(
         )
         if selected_user is None:
             db.rollback()
-            return None
+            return AssignmentOutcome.NO_CANDIDATE
 
-        return complete_ticket_user_assignment(
+        complete_ticket_user_assignment(
             db,
             ticket,
             selected_user,
             changed_by_id=None,
             source=AssignmentSource.AUTOMATIC,
         )
+        return AssignmentOutcome.ASSIGNED
     except Exception:
         db.rollback()
         raise
@@ -340,22 +355,20 @@ def auto_assign_ticket_to_user(
 
 @dataclass(frozen=True)
 class AutoAssignmentResult:
-    """Cantidad de tickets procesados correctamente en cada etapa."""
+    """Resumen observable de una tanda de autoasignación."""
 
     teams_assigned: int
     users_assigned: int
+    teams_without_candidate: int
+    users_without_candidate: int
+    skipped: int
+    errors: int
 
 
-def process_due_auto_assignments(
-    db: Session,
-    *,
-    now: datetime | None = None,
-    limit: int = 100,
-) -> AutoAssignmentResult:
-    """Procesa tickets vencidos; los que no tienen candidato quedan para reintento."""
+def _find_due_team_ticket_ids(db: Session, current_time: datetime, limit: int) -> list[UUID]:
+    """Obtiene la tanda vencida que todavía espera un team."""
 
-    current_time = now or datetime.now(timezone.utc)
-    team_ticket_ids = [
+    return [
         row[0]
         for row in (
             db.query(Ticket.id)
@@ -372,12 +385,12 @@ def process_due_auto_assignments(
             .all()
         )
     ]
-    teams_assigned = sum(
-        auto_assign_ticket_to_team(db, ticket_id, now=current_time) is not None
-        for ticket_id in team_ticket_ids
-    )
 
-    user_ticket_ids = [
+
+def _find_due_user_ticket_ids(db: Session, current_time: datetime, limit: int) -> list[UUID]:
+    """Obtiene la tanda vencida que todavía espera un responsable."""
+
+    return [
         row[0]
         for row in (
             db.query(Ticket.id)
@@ -394,11 +407,70 @@ def process_due_auto_assignments(
             .all()
         )
     ]
-    users_assigned = sum(
-        auto_assign_ticket_to_user(db, ticket_id, now=current_time) is not None
-        for ticket_id in user_ticket_ids
+
+
+def _process_ticket_ids(
+    db: Session,
+    ticket_ids: list[UUID],
+    executor: Callable[..., AssignmentOutcome],
+    *,
+    current_time: datetime,
+    phase: str,
+) -> tuple[Counter, int]:
+    """Aísla cada ticket para que un error no interrumpa toda la tanda."""
+
+    outcomes: Counter = Counter()
+    errors = 0
+    for ticket_id in ticket_ids:
+        try:
+            outcome = executor(db, ticket_id, now=current_time)
+            outcomes[outcome] += 1
+        except Exception:
+            # También recupera la sesión si el executor falló antes de su rollback.
+            db.rollback()
+            errors += 1
+            logger.exception(
+                "Error processing automatic ticket assignment",
+                extra={
+                    "ticket_id": str(ticket_id),
+                    "assignment_phase": phase,
+                },
+            )
+    return outcomes, errors
+
+
+def process_due_auto_assignments(
+    db: Session,
+    *,
+    now: datetime | None = None,
+    limit: int = 100,
+) -> AutoAssignmentResult:
+    """Procesa tickets vencidos; los que no tienen candidato quedan para reintento."""
+
+    current_time = now or datetime.now(timezone.utc)
+    team_outcomes, team_errors = _process_ticket_ids(
+        db,
+        _find_due_team_ticket_ids(db, current_time, limit),
+        auto_assign_ticket_to_team,
+        current_time=current_time,
+        phase="TEAM",
+    )
+
+    user_outcomes, user_errors = _process_ticket_ids(
+        db,
+        _find_due_user_ticket_ids(db, current_time, limit),
+        auto_assign_ticket_to_user,
+        current_time=current_time,
+        phase="USER",
     )
     return AutoAssignmentResult(
-        teams_assigned=teams_assigned,
-        users_assigned=users_assigned,
+        teams_assigned=team_outcomes[AssignmentOutcome.ASSIGNED],
+        users_assigned=user_outcomes[AssignmentOutcome.ASSIGNED],
+        teams_without_candidate=team_outcomes[AssignmentOutcome.NO_CANDIDATE],
+        users_without_candidate=user_outcomes[AssignmentOutcome.NO_CANDIDATE],
+        skipped=(
+            team_outcomes[AssignmentOutcome.SKIPPED]
+            + user_outcomes[AssignmentOutcome.SKIPPED]
+        ),
+        errors=team_errors + user_errors,
     )

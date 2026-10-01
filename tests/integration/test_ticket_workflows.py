@@ -389,6 +389,10 @@ def test_due_ticket_is_assigned_to_team_and_member_in_one_processing_run(integra
 
     assert result.teams_assigned == 1
     assert result.users_assigned == 1
+    assert result.teams_without_candidate == 0
+    assert result.users_without_candidate == 0
+    assert result.skipped == 0
+    assert result.errors == 0
     assert ticket.team_id == team_a.id
     assert ticket.assigned_to == team_a_available_admin.id
     assert ticket.team_queue_entered_at is None
@@ -443,6 +447,10 @@ def test_due_ticket_remains_queued_when_category_has_no_operational_team(integra
 
     assert result.teams_assigned == 0
     assert result.users_assigned == 0
+    assert result.teams_without_candidate == 1
+    assert result.users_without_candidate == 0
+    assert result.skipped == 0
+    assert result.errors == 0
     assert ticket.team_id is None
     assert ticket.assigned_to is None
     assert ticket.team_assignment_due_at == original_due_at

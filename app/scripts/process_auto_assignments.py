@@ -17,6 +17,10 @@ def main() -> None:
         result = process_due_auto_assignments(db)
         print(f"Teams asignados: {result.teams_assigned}")
         print(f"Responsables asignados: {result.users_assigned}")
+        print(f"Sin team candidato: {result.teams_without_candidate}")
+        print(f"Sin responsable candidato: {result.users_without_candidate}")
+        print(f"Omitidos: {result.skipped}")
+        print(f"Errores: {result.errors}")
     finally:
         db.close()
 
