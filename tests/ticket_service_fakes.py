@@ -64,9 +64,10 @@ class FailingCommitDb(FakeDb):
 
 
 class FakeQuery:
-    def __init__(self, item=None, items=None):
+    def __init__(self, item=None, items=None, on_for_update=None):
         self.item = item
         self.items = items if items is not None else ([] if item is None else [item])
+        self.on_for_update = on_for_update
 
     def filter(self, *args, **kwargs):
         return self
@@ -77,6 +78,8 @@ class FakeQuery:
     def with_for_update(self, *args, **kwargs):
         """Imita SELECT FOR UPDATE; el bloqueo real se prueba con PostgreSQL."""
 
+        if self.on_for_update is not None:
+            self.on_for_update()
         return self
 
     def order_by(self, *args, **kwargs):
@@ -127,7 +130,11 @@ class TeamAwareFakeDb(FakeDb):
         self.blocked_tickets = blocked_tickets
         self.tickets = tickets
         self.ticket_query_count = 0
+        self.ticket_for_update_count = 0
         self.dependency_id_query_count = 0
+
+    def _record_ticket_for_update(self):
+        self.ticket_for_update_count += 1
 
     def query(self, model):
         model_class = getattr(model, "class_", None)
@@ -155,7 +162,7 @@ class TeamAwareFakeDb(FakeDb):
                 return FakeQuery(None)
             if self.ticket_query_count == 2 and self.depends_on_ticket is not None:
                 return FakeQuery(self.depends_on_ticket)
-            return FakeQuery(self.ticket)
+            return FakeQuery(self.ticket, on_for_update=self._record_ticket_for_update)
         if model is User or model_class is User:
             return FakeQuery(self.assigned_user)
         if model is Team or model_class is Team:

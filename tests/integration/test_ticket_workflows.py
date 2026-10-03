@@ -1,9 +1,12 @@
 """Flujos criticos de tickets ejecutados contra PostgreSQL real."""
 
 from datetime import datetime, timezone
+from threading import Event, Thread
+from time import sleep
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.orm import Session
 
 from app.models.category import CategoryTeam, TeamAssignmentStrategy, TicketCategory
 from app.models.team import AssignmentStrategy, Team, TeamMember
@@ -20,7 +23,7 @@ from app.models.ticket import (
 from app.models.user import User, UserRole
 from app.schemas.ticket import TicketCommentCreate, TicketCreate
 from app.services.ticket_comment_service import create_ticket_comment, get_ticket_comments
-from app.services.ticket_assignment_service import claim_ticket
+from app.services.ticket_assignment_service import assign_ticket, claim_ticket
 from app.services.ticket_auto_assignment_service import find_team_auto_assignment_candidate
 from app.services.ticket_auto_assignment_service import process_due_auto_assignments
 from app.services.ticket_dependency_service import add_ticket_dependency
@@ -275,6 +278,130 @@ def test_operational_member_claims_team_ticket_and_persists_assignment_history(
     assert history.changed_by == operational_user.id
     integration_db.refresh(operational_user)
     assert operational_user.last_assigned_at is not None
+
+
+def test_manual_assignment_waits_for_lock_and_uses_latest_ticket_state(integration_engine):
+    """Una asignacion manual espera el lock y no sobrescribe datos antiguos."""
+
+    setup_db = Session(integration_engine)
+    lock_db = Session(integration_engine)
+    worker = None
+    worker_started = Event()
+    worker_finished = Event()
+    worker_errors = []
+
+    try:
+        requester = _create_user(setup_db, UserRole.USER)
+        automatic_agent = _create_user(setup_db, UserRole.AGENT)
+        manual_agent = _create_user(setup_db, UserRole.AGENT)
+        admin = _create_user(setup_db, UserRole.ADMIN)
+        category = _create_category(setup_db)
+        team = Team(name=f"Team concurrente {uuid4()}")
+        setup_db.add(team)
+        setup_db.flush()
+        setup_db.add_all(
+            [
+                TeamMember(team_id=team.id, user_id=automatic_agent.id),
+                TeamMember(team_id=team.id, user_id=manual_agent.id),
+            ]
+        )
+        ticket = _create_ticket(setup_db, requester, category, team_id=team.id)
+        setup_db.commit()
+
+        ticket_id = ticket.id
+        team_id = team.id
+        category_id = category.id
+        requester_id = requester.id
+        automatic_agent_id = automatic_agent.id
+        manual_agent_id = manual_agent.id
+        admin_id = admin.id
+
+        # Simula otra operacion que ya tiene la fila y prepara una asignacion.
+        locked_ticket = (
+            lock_db.query(Ticket)
+            .filter(Ticket.id == ticket_id)
+            .with_for_update()
+            .one()
+        )
+        locked_ticket.assigned_to = automatic_agent_id
+        lock_db.flush()
+
+        def run_manual_assignment():
+            worker_db = Session(integration_engine)
+            try:
+                worker_started.set()
+                current_admin = worker_db.get(User, admin_id)
+                assign_ticket(worker_db, ticket_id, manual_agent_id, current_admin)
+            except Exception as exc:  # El hilo comunica el error al test principal.
+                worker_errors.append(exc)
+            finally:
+                worker_db.close()
+                worker_finished.set()
+
+        worker = Thread(target=run_manual_assignment)
+        worker.start()
+        assert worker_started.wait(timeout=2)
+
+        # Mientras la primera transaccion conserva FOR UPDATE, la segunda espera.
+        sleep(0.2)
+        assert worker_finished.is_set() is False
+
+        lock_db.commit()
+        worker.join(timeout=5)
+        assert worker_finished.is_set() is True
+        assert worker_errors == []
+
+        verification_db = Session(integration_engine)
+        try:
+            persisted_ticket = verification_db.get(Ticket, ticket_id)
+            history = (
+                verification_db.query(TicketAssignmentHistory)
+                .filter(TicketAssignmentHistory.ticket_id == ticket_id)
+                .one()
+            )
+
+            assert persisted_ticket.assigned_to == manual_agent_id
+            # El historial prueba que el service releyo el valor confirmado al liberar el lock.
+            assert history.old_assigned_to == automatic_agent_id
+            assert history.new_assigned_to == manual_agent_id
+            assert history.changed_by == admin_id
+        finally:
+            verification_db.close()
+    finally:
+        # Libera cualquier lock pendiente antes de esperar o limpiar el escenario.
+        lock_db.rollback()
+        lock_db.close()
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=5)
+        setup_db.close()
+
+        if "ticket_id" in locals():
+            cleanup_db = Session(integration_engine)
+            try:
+                cleanup_db.query(TicketAssignmentHistory).filter(
+                    TicketAssignmentHistory.ticket_id == ticket_id
+                ).delete(synchronize_session=False)
+                cleanup_db.query(Ticket).filter(Ticket.id == ticket_id).delete(
+                    synchronize_session=False
+                )
+                cleanup_db.query(TeamMember).filter(TeamMember.team_id == team_id).delete(
+                    synchronize_session=False
+                )
+                cleanup_db.query(Team).filter(Team.id == team_id).delete(
+                    synchronize_session=False
+                )
+                cleanup_db.query(User).filter(
+                    User.id.in_([requester_id, automatic_agent_id, manual_agent_id, admin_id])
+                ).delete(synchronize_session=False)
+                cleanup_db.query(TicketCategory).filter(
+                    TicketCategory.id == category_id
+                ).delete(synchronize_session=False)
+                cleanup_db.commit()
+            except Exception:
+                cleanup_db.rollback()
+                raise
+            finally:
+                cleanup_db.close()
 
 
 def test_least_active_selector_uses_real_team_members_and_ticket_counts(integration_db):

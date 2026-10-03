@@ -183,6 +183,7 @@ def test_assign_ticket_updates_ticket_and_creates_history():
     assert db.committed is True
     assert db.refreshed is ticket
     assert db.rolled_back is False
+    assert db.ticket_for_update_count == 1
     assert len(db.added) == 1
 
     history = db.added[0]
@@ -248,7 +249,7 @@ def test_assign_ticket_raises_permission_error_when_user_cannot_assign():
     assert db.added == []
     assert db.committed is False
     assert db.refreshed is None
-    assert db.rolled_back is False
+    assert db.rolled_back is True
 
 
 def test_assign_ticket_raises_specific_error_when_agent_is_already_assigned():
@@ -288,7 +289,7 @@ def test_assign_ticket_raises_specific_error_when_agent_is_already_assigned():
     assert db.added == []
     assert db.committed is False
     assert db.refreshed is None
-    assert db.rolled_back is False
+    assert db.rolled_back is True
 
 
 def test_assign_ticket_rejects_inactive_agent():
@@ -466,6 +467,7 @@ def test_assign_ticket_to_team_updates_ticket_team():
     assert db.added[0].new_team_id == team.id
     assert db.added[0].changed_by == current_user.id
     assert db.added[0].source == AssignmentSource.MANUAL
+    assert db.ticket_for_update_count == 1
 
 
 def test_assign_ticket_to_same_team_raises_error():
@@ -561,6 +563,7 @@ def test_admin_changes_ticket_category_and_clears_team_and_assignee():
     assert ticket.team_id is None
     assert ticket.assigned_to is None
     assert db.committed is True
+    assert db.ticket_for_update_count == 1
 
     category_history = db.added[0]
     assert isinstance(category_history, TicketCategoryHistory)

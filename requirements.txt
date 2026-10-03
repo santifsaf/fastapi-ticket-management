@@ -19,3 +19,7 @@ bcrypt==4.3.0
 # Validaciones usadas por Pydantic/FastAPI.
 email-validator==2.3.0
 python-multipart==0.0.26
+
+# Procesamiento en segundo plano y lock distribuido.
+celery[redis]==5.6.3
+redis==6.4.0

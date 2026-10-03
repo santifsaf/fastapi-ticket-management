@@ -375,6 +375,12 @@ Cada modificación registra su historial dentro de la misma transacción. Una
 recategorización limpia equipo y responsable porque podrían quedar incoherentes
 con la nueva categoría.
 
+La asignación manual de responsable, la asignación de equipo y el cambio de
+categoría también bloquean la fila con `FOR UPDATE`. Si otra transacción está
+modificando ese ticket, esperan a que termine y vuelven a evaluar las reglas
+sobre el estado confirmado más reciente. Ante cualquier error se ejecuta
+`rollback()` para liberar el lock.
+
 El reclamo está habilitado para usuarios `AGENT` o `ADMIN` activos, miembros del
 equipo y cuando este habilitó `self_assignment_enabled`. El alcance global de un
 administrador no reemplaza la membresía: para reclamar participa como un miembro
@@ -409,6 +415,11 @@ Cada intento devuelve `ASSIGNED`, `NO_CANDIDATE` o `SKIPPED`. El procesador
 aísla las excepciones por ticket, hace rollback, registra el ticket y la etapa,
 y continúa con el resto. `AutoAssignmentResult` resume asignaciones, ausencia de
 candidatos, omisiones y errores para facilitar el monitoreo del futuro worker.
+
+La configuración central ya define broker y lock en Redis, frecuencia de
+consulta, tamaño de tanda por fase y límites de tiempo. La tarea Celery todavía
+no forma parte de esta etapa: estos valores preparan su incorporación sin
+mezclar infraestructura con el service de dominio.
 
 Los historiales distinguen `MANUAL`, `CLAIM` y `AUTOMATIC`. En una acción
 automática, `changed_by` queda en `NULL` porque no intervino una persona.
@@ -678,8 +689,8 @@ las pruebas de concurrencia con varios workers reales.
 
 ### Prioridad alta
 
-1. Integrar `process_due_auto_assignments()` con un worker periódico; el script
-   actual permite ejecutar y probar el procesamiento manualmente.
+1. Integrar `process_due_auto_assignments()` con una tarea Celery periódica que
+   use el broker, los límites y el lock distribuido ya configurados.
 2. Completar el uso de datetimes con timezone. Algunos campos antiguos todavía
    usan `datetime.utcnow()` y generan advertencias.
 3. Decidir si las consultas simples que aún viven en routers de teams/categories/

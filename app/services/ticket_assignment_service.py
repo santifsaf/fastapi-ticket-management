@@ -1,6 +1,7 @@
 """Casos de uso de asignacion, equipo y categoria de tickets."""
 
 from datetime import datetime, timezone
+from functools import wraps
 from uuid import UUID
 
 from sqlalchemy import func
@@ -43,6 +44,20 @@ from app.services.ticket_exceptions import (
 from app.services.ticket_service_utils import commit_and_refresh, normalize_optional_reason
 
 
+def _rollback_locked_operation(operation):
+    """Libera el lock de la fila si el caso de uso termina con una excepción."""
+
+    @wraps(operation)
+    def wrapper(db: Session, *args, **kwargs):
+        try:
+            return operation(db, *args, **kwargs)
+        except Exception:
+            db.rollback()
+            raise
+
+    return wrapper
+
+
 def complete_ticket_user_assignment(
     db: Session,
     ticket: Ticket,
@@ -73,10 +88,16 @@ def complete_ticket_user_assignment(
     return commit_and_refresh(db, ticket)
 
 
+@_rollback_locked_operation
 def assign_ticket(db: Session, ticket_id: UUID, assigned_user_id: UUID, current_user: User) -> Ticket:
     """Asigna a un miembro activo del team como responsable del ticket."""
 
-    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    ticket = (
+        db.query(Ticket)
+        .filter(Ticket.id == ticket_id)
+        .with_for_update()
+        .first()
+    )
     if ticket is None:
         raise TicketNotFoundError("Ticket not found")
 
@@ -172,10 +193,16 @@ def claim_ticket(db: Session, ticket_id: UUID, current_user: User) -> Ticket:
         raise
 
 
+@_rollback_locked_operation
 def assign_ticket_to_team(db: Session, ticket_id: UUID, team_id: UUID, current_user: User) -> Ticket:
     """Asigna un ticket a un equipo y audita el cambio."""
 
-    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    ticket = (
+        db.query(Ticket)
+        .filter(Ticket.id == ticket_id)
+        .with_for_update()
+        .first()
+    )
     if ticket is None:
         raise TicketNotFoundError("Ticket not found")
 
@@ -224,6 +251,7 @@ def assign_ticket_to_team(db: Session, ticket_id: UUID, team_id: UUID, current_u
     return commit_and_refresh(db, ticket)
 
 
+@_rollback_locked_operation
 def change_ticket_category(
     db: Session,
     ticket_id: UUID,
@@ -233,7 +261,12 @@ def change_ticket_category(
 ) -> Ticket:
     """Recategoriza el ticket y limpia asignaciones que pueden quedar invalidas."""
 
-    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    ticket = (
+        db.query(Ticket)
+        .filter(Ticket.id == ticket_id)
+        .with_for_update()
+        .first()
+    )
     if ticket is None:
         raise TicketNotFoundError("Ticket not found")
 
