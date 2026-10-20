@@ -1,0 +1,17 @@
+# Archivos locales y secretos que nunca deben entrar en la imagen.
+.git/
+.github/
+.vscode/
+.env
+venv/
+
+# Artefactos de Python y pytest.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.tmp-pip/
+
+# La imagen de ejecución no necesita tests ni documentación personal.
+tests/
+Anotaciones.txt
+ARQUITECTURA.md
