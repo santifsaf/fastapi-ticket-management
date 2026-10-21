@@ -21,3 +21,12 @@ def test_celery_app_uses_safe_message_and_result_settings():
     assert celery_app.conf.timezone == "UTC"
     assert celery_app.conf.broker_connection_retry_on_startup is True
     assert celery_app.conf.result_backend is None
+
+
+def test_celery_beat_schedules_auto_assignment_polling():
+    """Beat publica la tarea registrada usando el intervalo configurado."""
+
+    schedule = celery_app.conf.beat_schedule["process-due-auto-assignments"]
+
+    assert schedule["task"] == "tickets.process_auto_assignments"
+    assert schedule["schedule"] == settings.auto_assignment_poll_seconds

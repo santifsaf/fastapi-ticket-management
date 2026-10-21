@@ -35,3 +35,10 @@ def test_lock_timeout_must_be_greater_than_task_time_limit():
 def test_auto_assignment_batch_size_must_be_positive():
     with pytest.raises(ValidationError):
         make_settings(auto_assignment_batch_size_per_phase=0)
+
+
+def test_auto_assignment_poll_interval_must_be_positive():
+    """Beat no puede ejecutar un calendario con intervalo nulo o negativo."""
+
+    with pytest.raises(ValidationError):
+        make_settings(auto_assignment_poll_seconds=0)

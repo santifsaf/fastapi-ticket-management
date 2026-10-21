@@ -25,4 +25,12 @@ celery_app.conf.update(
     broker_connection_retry_on_startup=True,
     # Celery importa este módulo al iniciar el worker para registrar sus tareas.
     imports=("app.workers.tasks",),
+    # Beat publica la tarea con esta frecuencia; el worker decide cuándo
+    # ejecutarla y el service selecciona únicamente los tickets ya vencidos.
+    beat_schedule={
+        "process-due-auto-assignments": {
+            "task": "tickets.process_auto_assignments",
+            "schedule": settings.auto_assignment_poll_seconds,
+        },
+    },
 )

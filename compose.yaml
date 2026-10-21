@@ -108,6 +108,38 @@ services:
       # Una sola tarea simultánea alcanza para este worker especializado.
       - --concurrency=1
 
+  beat:
+    image: ticket-management:dev
+    build:
+      context: .
+    container_name: ticket-management-beat
+    restart: unless-stopped
+
+    # Beat solo publica mensajes en Redis. La URL de base es necesaria porque
+    # forma parte de la configuración central, aunque Beat no consulta tickets.
+    environment:
+      APP_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-ticket_user}:${POSTGRES_PASSWORD:-ticketing_dev_password}@postgres:5432/${POSTGRES_DB:-ticket_management}
+      APP_SECRET_KEY: ${APP_SECRET_KEY:-docker-development-secret}
+      APP_REDIS_URL: redis://redis:6379/0
+      APP_CELERY_BROKER_URL: redis://redis:6379/0
+      APP_AUTO_ASSIGNMENT_POLL_SECONDS: ${APP_AUTO_ASSIGNMENT_POLL_SECONDS:-60}
+
+    depends_on:
+      redis:
+        condition: service_healthy
+
+    # El archivo local mantiene el estado del calendario y /tmp es escribible
+    # por el usuario sin privilegios definido en el Dockerfile.
+    command:
+      - python
+      - -m
+      - celery
+      - -A
+      - app.workers.celery_app:celery_app
+      - beat
+      - --loglevel=INFO
+      - --schedule=/tmp/celerybeat-schedule
+
   migrate:
     image: ticket-management:dev
     build:
