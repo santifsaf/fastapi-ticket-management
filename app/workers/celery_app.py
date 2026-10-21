@@ -23,4 +23,6 @@ celery_app.conf.update(
     timezone="UTC",
     # Si Redis arranca después del worker, Celery reintenta la conexión inicial.
     broker_connection_retry_on_startup=True,
+    # Celery importa este módulo al iniciar el worker para registrar sus tareas.
+    imports=("app.workers.tasks",),
 )

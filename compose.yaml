@@ -45,6 +45,89 @@ services:
       timeout: 3s
       retries: 5
 
+  api:
+    image: ticket-management:dev
+    build:
+      context: .
+    container_name: ticket-management-api
+    restart: unless-stopped
+
+    # Dentro de Compose los servicios se alcanzan por nombre, no por localhost.
+    environment:
+      APP_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-ticket_user}:${POSTGRES_PASSWORD:-ticketing_dev_password}@postgres:5432/${POSTGRES_DB:-ticket_management}
+      APP_SECRET_KEY: ${APP_SECRET_KEY:-docker-development-secret}
+      APP_REDIS_URL: redis://redis:6379/0
+      APP_CELERY_BROKER_URL: redis://redis:6379/0
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/openapi.json', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    image: ticket-management:dev
+    build:
+      context: .
+    container_name: ticket-management-worker
+    restart: unless-stopped
+
+    # El worker comparte infraestructura con la API, pero ejecuta otro proceso.
+    environment:
+      APP_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-ticket_user}:${POSTGRES_PASSWORD:-ticketing_dev_password}@postgres:5432/${POSTGRES_DB:-ticket_management}
+      APP_SECRET_KEY: ${APP_SECRET_KEY:-docker-development-secret}
+      APP_REDIS_URL: redis://redis:6379/0
+      APP_CELERY_BROKER_URL: redis://redis:6379/0
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    # -A selecciona nuestra app Celery; worker inicia el consumidor de tareas.
+    command:
+      - python
+      - -m
+      - celery
+      - -A
+      - app.workers.celery_app:celery_app
+      - worker
+      - --loglevel=INFO
+      - --hostname=worker@%h
+      # Una sola tarea simultánea alcanza para este worker especializado.
+      - --concurrency=1
+
+  migrate:
+    image: ticket-management:dev
+    build:
+      context: .
+    container_name: ticket-management-migrate
+
+    # Esta URL usa el DNS interno de Compose, no el puerto publicado en Windows.
+    environment:
+      APP_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-ticket_user}:${POSTGRES_PASSWORD:-ticketing_dev_password}@postgres:5432/${POSTGRES_DB:-ticket_management}
+      APP_SECRET_KEY: ${APP_SECRET_KEY:-docker-development-secret}
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    # Es un proceso puntual: aplica migraciones y termina.
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    restart: "no"
+    profiles: ["tools"]
+
 volumes:
   postgres-data:
   redis-data:
